@@ -1,8 +1,7 @@
 import itertools
+import torch
 import triton
 import triton.language as tl
-
-RLMIN = tl.constexpr(1.0e-8)
 
 @triton.autotune(
     configs=[
@@ -15,6 +14,7 @@ RLMIN = tl.constexpr(1.0e-8)
 )
 @triton.jit
 def _kernel(zqx_l_ptr, zqx_i_ptr, za_ptr, zli_ptr, zliqfrac_ptr, zicefrac_ptr, N, BLOCK_SIZE: tl.constexpr):
+    RLMIN = 1.0e-8
     offs = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offs < N
 
