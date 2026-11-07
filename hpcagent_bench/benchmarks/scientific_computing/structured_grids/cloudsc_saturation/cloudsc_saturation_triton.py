@@ -2,8 +2,9 @@ import itertools
 import triton
 import triton.language as tl
 
-RD            = tl.constexpr(287.0597)
-RV            = tl.constexpr(461.5250)
+RD  = 287.0597
+RV  = 461.5250
+
 RTT           = tl.constexpr(273.16)
 RETV          = tl.constexpr(RV / RD - 1.0)
 R2ES          = tl.constexpr(611.21 * RD / RV)
