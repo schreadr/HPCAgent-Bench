@@ -1,7 +1,7 @@
 # Copyright 2026 ETH Zurich and the HPCAgent-Bench authors.
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Particle-parallel WarpX gather, including every geometry and Yee type; all six field components in one launch.
+"""Fixed particle-parallel WarpX gather, including every geometry and Yee type.
 
 Source: derived from PR #166 (student baseline, validated here unchanged in substance).
 """
@@ -9,8 +9,7 @@ Source: derived from PR #166 (student baseline, validated here unchanged in subs
 import torch
 import triton
 import triton.language as tl
-
-from hpcagent_bench.support.helpers.triton_utilities import div_rn, sqrt_rn
+import triton.language.extra.cuda.libdevice as libdevice
 
 
 @triton.jit
@@ -18,7 +17,7 @@ def gather_divide(a, b):
     if a.dtype == tl.float64:
         result = a / b
     else:
-        result = div_rn(a, b)
+        result = tl.div_rn(a, b)
     return result
 
 
@@ -154,7 +153,7 @@ def gather_modes(
 
 
 @triton.jit
-def gather_component(
+def gather_component_kernel(
     output,
     ex,
     ey,
@@ -190,10 +189,10 @@ def gather_component(
     px = tl.load(xp + particle * PARTICLE_STRIDES[0], valid, other=0)
     py = tl.load(yp + particle * PARTICLE_STRIDES[1], valid, other=0)
     pz = tl.load(zp + particle * PARTICLE_STRIDES[2], valid, other=0)
-    radius_xy = sqrt_rn(px * px + py * py)
+    radius_xy = libdevice.sqrt_rn(px * px + py * py)
     radius = radius_xy
     if GEOM == 5:
-        radius = sqrt_rn(px * px + py * py + pz * pz)
+        radius = libdevice.sqrt_rn(px * px + py * py + pz * pz)
     if GEOM == 2 or GEOM == 4 or GEOM == 5:
         x = (radius - tl.load(xyzmin)) * tl.load(dinv)
     else:
@@ -301,201 +300,6 @@ def gather_component(
     tl.store(address, tl.load(address, valid, other=0) + own, valid)
 
 
-@triton.jit
-def gather_kernel(
-    out0, out1, out2, out3, out4, out5, ex, ey, ez, bx, by, bz, etx, ety, etz, btx, bty, btz, xp, yp, zp, dinv,
-    xyzmin, lo, N: tl.constexpr, ORDER: tl.constexpr, GAL: tl.constexpr, GEOM: tl.constexpr, MODES: tl.constexpr,
-    STRIDES: tl.constexpr, PARTICLE_STRIDES: tl.constexpr, OUT_STRIDES: tl.constexpr, BLOCK: tl.constexpr,
-):  # fmt: skip
-    """All six components (Ex, Ey, Ez, Bx, By, Bz) of this program's particles in one launch."""
-    gather_component(
-        out0,
-        ex,
-        ey,
-        ez,
-        bx,
-        by,
-        bz,
-        etx,
-        ety,
-        etz,
-        btx,
-        bty,
-        btz,
-        xp,
-        yp,
-        zp,
-        dinv,
-        xyzmin,
-        lo,
-        N,
-        ORDER,
-        GAL,
-        GEOM,
-        MODES,
-        0,
-        STRIDES,
-        PARTICLE_STRIDES,
-        OUT_STRIDES[0],
-        BLOCK,
-    )
-    gather_component(
-        out1,
-        ex,
-        ey,
-        ez,
-        bx,
-        by,
-        bz,
-        etx,
-        ety,
-        etz,
-        btx,
-        bty,
-        btz,
-        xp,
-        yp,
-        zp,
-        dinv,
-        xyzmin,
-        lo,
-        N,
-        ORDER,
-        GAL,
-        GEOM,
-        MODES,
-        1,
-        STRIDES,
-        PARTICLE_STRIDES,
-        OUT_STRIDES[1],
-        BLOCK,
-    )
-    gather_component(
-        out2,
-        ex,
-        ey,
-        ez,
-        bx,
-        by,
-        bz,
-        etx,
-        ety,
-        etz,
-        btx,
-        bty,
-        btz,
-        xp,
-        yp,
-        zp,
-        dinv,
-        xyzmin,
-        lo,
-        N,
-        ORDER,
-        GAL,
-        GEOM,
-        MODES,
-        2,
-        STRIDES,
-        PARTICLE_STRIDES,
-        OUT_STRIDES[2],
-        BLOCK,
-    )
-    gather_component(
-        out3,
-        ex,
-        ey,
-        ez,
-        bx,
-        by,
-        bz,
-        etx,
-        ety,
-        etz,
-        btx,
-        bty,
-        btz,
-        xp,
-        yp,
-        zp,
-        dinv,
-        xyzmin,
-        lo,
-        N,
-        ORDER,
-        GAL,
-        GEOM,
-        MODES,
-        3,
-        STRIDES,
-        PARTICLE_STRIDES,
-        OUT_STRIDES[3],
-        BLOCK,
-    )
-    gather_component(
-        out4,
-        ex,
-        ey,
-        ez,
-        bx,
-        by,
-        bz,
-        etx,
-        ety,
-        etz,
-        btx,
-        bty,
-        btz,
-        xp,
-        yp,
-        zp,
-        dinv,
-        xyzmin,
-        lo,
-        N,
-        ORDER,
-        GAL,
-        GEOM,
-        MODES,
-        4,
-        STRIDES,
-        PARTICLE_STRIDES,
-        OUT_STRIDES[4],
-        BLOCK,
-    )
-    gather_component(
-        out5,
-        ex,
-        ey,
-        ez,
-        bx,
-        by,
-        bz,
-        etx,
-        ety,
-        etz,
-        btx,
-        bty,
-        btz,
-        xp,
-        yp,
-        zp,
-        dinv,
-        xyzmin,
-        lo,
-        N,
-        ORDER,
-        GAL,
-        GEOM,
-        MODES,
-        5,
-        STRIDES,
-        PARTICLE_STRIDES,
-        OUT_STRIDES[5],
-        BLOCK,
-    )
-
-
 def warpx_field_gather(
     Bxp,
     Byp,
@@ -540,26 +344,27 @@ def warpx_field_gather(
         return
     fields = (ex_arr, ey_arr, ez_arr, bx_arr, by_arr, bz_arr)
     types = (ex_type, ey_type, ez_type, bx_type, by_type, bz_type)
-    outputs = (Exp, Eyp, Ezp, Bxp, Byp, Bzp)
-    gather_kernel[(triton.cdiv(count, 128),)](
-        *outputs,
-        *fields,
-        *types,
-        xp,
-        yp,
-        zp,
-        dinv,
-        xyzmin,
-        lo,
-        count,
-        order,
-        gal,
-        geometry,
-        modes,
-        tuple(field.stride() for field in fields),
-        (xp.stride(0), yp.stride(0), zp.stride(0)),
-        tuple(output.stride(0) for output in outputs),
-        BLOCK=128,
-        num_warps=4,
-        enable_fp_fusion=False,
-    )
+    for component, output in enumerate((Exp, Eyp, Ezp, Bxp, Byp, Bzp)):
+        gather_component_kernel[(triton.cdiv(count, 128),)](
+            output,
+            *fields,
+            *types,
+            xp,
+            yp,
+            zp,
+            dinv,
+            xyzmin,
+            lo,
+            count,
+            order,
+            gal,
+            geometry,
+            modes,
+            component,
+            tuple(field.stride() for field in fields),
+            (xp.stride(0), yp.stride(0), zp.stride(0)),
+            output.stride(0),
+            BLOCK=128,
+            num_warps=4,
+            enable_fp_fusion=False,
+        )
