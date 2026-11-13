@@ -14,7 +14,8 @@ import torch
 import triton
 import triton.language as tl
 
-from hpcagent_bench.support.helpers.triton_utilities import cbrt, grid_sync, persistent_zeros
+from hpcagent_bench.support.helpers.triton_utilities import grid_sync, persistent_zeros
+from triton.language.extra import libdevice
 
 # Flanagan-Belytschko hourglass modes (node, mode) and the VoluDer source nodes of each corner.
 GAMMA = tl.constexpr(
@@ -234,7 +235,7 @@ def force_block(
     hy = (mode_sum(yc, 0), mode_sum(yc, 1), mode_sum(yc, 2), mode_sum(yc, 3))
     hz = (mode_sum(zc, 0), mode_sum(zc, 1), mode_sum(zc, 2), mode_sum(zc, 3))
     coef = -3.0 * 0.01 * tl.load(ss + e, mask=m, other=0.0) * tl.load(elem_mass + e, mask=m, other=0.0)
-    coef = coef / cbrt(determ)
+    coef = coef / libdevice.cbrt(determ)
     scatter_component(fx, n, m, sig, nx, dvdx, dvdy, dvdz, hx, hy, hz, volinv, corners(xd, n, m), coef)
     scatter_component(fy, n, m, sig, ny, dvdx, dvdy, dvdz, hx, hy, hz, volinv, corners(yd, n, m), coef)
     scatter_component(fz, n, m, sig, nz, dvdx, dvdy, dvdz, hx, hy, hz, volinv, corners(zd, n, m), coef)
