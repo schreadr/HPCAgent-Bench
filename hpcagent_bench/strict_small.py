@@ -33,23 +33,18 @@ wherever numpy runs, without the harness stack.
 
 import math
 import types
-from collections.abc import Callable, Sequence
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import numpy as np
-from numpy.typing import DTypeLike
 
 __all__ = [
     "STRICT_CHUNK",
     "L2Sums",
     "SignMismatches",
-    "SpanMap",
     "StrictSmall",
     "finite_l2_norm",
-    "finite_peak",
     "l2_reason",
     "l2_sums",
-    "serial_spans",
     "sign_mismatches",
     "sign_reason",
     "strict_small_reason",
@@ -64,27 +59,14 @@ class StrictSmall(NamedTuple):
     l2_factor: float
 
 
-#: How a chunked pass runs ``work`` over its slices: the results in slice order.
-type SpanMap = Callable[[Sequence[slice], Callable[[slice], Any]], list[Any]]
-
-
-def serial_spans(spans: Sequence[slice], work: Callable[[slice], Any]) -> list[Any]:
-    """``work`` on every slice, in order, on the calling thread."""
-    return [work(span) for span in spans]
-
-
 #: Elements per slice of the chunked passes, matching the comparator's own working set
 #: (:data:`hpcagent_bench.frameworks.utilities.COMPARE_CHUNK`): 4M elements, 64 MiB of complex128.
 STRICT_CHUNK = 1 << 22
 
 
-def dtype_eps(dtype: DTypeLike) -> float:
-    """Machine epsilon of a floating ``dtype``; ``numpy.finfo`` first, the registered extension formats
-    (bfloat16, fp8) through ``ml_dtypes``.
-
-    ``numpy.finfo`` refuses them: ml_dtypes 0.6 reports ``float8_e5m2`` with dtype kind ``f``, so a
-    ``kind == "f"`` guard in front of ``np.finfo`` raised ``not compatible with finfo`` in the middle
-    of validating an fp8 output. Re-exported by :mod:`hpcagent_bench.precision`."""
+def _dtype_eps(dtype: np.dtype) -> float:
+    """Machine epsilon of a floating dtype; ``numpy.finfo`` first, the registered extension formats
+    (bfloat16, fp8) through ``ml_dtypes`` exactly as :func:`hpcagent_bench.precision.dtype_eps` does."""
     try:
         return float(np.finfo(dtype).eps)
     except (TypeError, ValueError):
@@ -94,23 +76,14 @@ def dtype_eps(dtype: DTypeLike) -> float:
 
 
 def finite_l2_norm(values: object, *, xp: types.ModuleType = np, chunk: int = STRICT_CHUNK) -> float:
-    """The L2 norm of ``values``' finite elements, chunked: one declared source's share of a rounding scale.
-
-    Summed in float64 whatever the source dtype, each element divided by the largest finite magnitude first (as
-    LAPACK's ``dnrm2`` scales), so neither an fp16 source past 256 nor an fp64 one past 1e154 overflows to inf."""
+    """The L2 norm of ``values``' finite elements, chunked: one declared source's share of a rounding scale."""
     flat = xp.asarray(values).reshape(-1)
-    wide = xp.complex128 if flat.dtype.kind == "c" else xp.float64
-    step = max(int(chunk), 1)
-    spans = range(0, int(flat.size), step)
-    parts = (flat[start : start + step].astype(wide) for start in spans)
-    scale = max((finite_peak(part, part, xp) for part in parts), default=0.0)
-    if scale == 0.0:
-        return 0.0
     total = 0.0
-    for start in spans:
-        part = flat[start : start + step].astype(wide)
-        total += float(xp.sum(xp.where(xp.isfinite(part), xp.abs(part / scale) ** 2, 0.0)))
-    return scale * math.sqrt(total)
+    for start in range(0, int(flat.size), max(int(chunk), 1)):
+        part = flat[start : start + chunk]
+        with np.errstate(over="ignore"):
+            total += float(xp.sum(xp.where(xp.isfinite(part), xp.abs(part) ** 2, 0.0)))
+    return math.sqrt(total)
 
 
 class L2Sums(NamedTuple):
@@ -126,41 +99,31 @@ class L2Sums(NamedTuple):
         return L2Sums(max(self.scale, other.scale), self.ref_sq + other.ref_sq, self.err_sq + other.err_sq)
 
 
-def l2_sums(
-    ce: object, ca: object, *, rtol: float, band_atol: float | None, xp: types.ModuleType, unit: float = 1.0
-) -> L2Sums:
+def l2_sums(ce: object, ca: object, *, rtol: float, band_atol: float | None, xp: types.ModuleType) -> L2Sums:
     """:class:`L2Sums` of one flat chunk of reference ``ce`` and answer ``ca`` in array module ``xp`` (numpy, cupy
-    or torch), the two sums of squares in units of ``unit`` (the whole output's inf-norm, so no square of an fp64
-    value above ~1.3e154 overflows; :func:`l2_reason` takes the same ``unit``). ``abs()**2`` of a complex is
-    ``|z|^2`` without a sqrt."""
+    or torch). ``abs()**2`` of a complex is ``|z|^2`` without a sqrt; an overflow saturates to inf, which fails."""
     finite = xp.isfinite(ce) & xp.isfinite(ca)
     with np.errstate(invalid="ignore", over="ignore"):
         in_band = finite if band_atol is None else finite & xp.isclose(ca, ce, rtol=rtol, atol=band_atol)
         return L2Sums(
             float(xp.max(xp.where(finite, xp.abs(ce), 0.0))),
-            float(xp.sum(xp.where(finite, (xp.abs(ce) / unit) ** 2, 0.0))),
-            float(xp.sum(xp.where(in_band, (xp.abs(xp.subtract(ca, ce)) / unit) ** 2, 0.0))),
+            float(xp.sum(xp.where(finite, xp.abs(ce) ** 2, 0.0))),
+            float(xp.sum(xp.where(in_band, xp.abs(xp.subtract(ca, ce)) ** 2, 0.0))),
         )
 
 
-def finite_peak(ce: object, ca: object, xp: types.ModuleType) -> float:
-    """The largest ``|ce|`` among the elements finite in both of a non-empty chunk ``ce`` and ``ca`` (0.0 for none)."""
-    finite = xp.isfinite(ce) & xp.isfinite(ca)
-    return float(xp.max(xp.where(finite, xp.abs(ce), 0.0)))
-
-
-def l2_reason(sums: L2Sums, *, rtol: float, l2_factor: float, inherited: float = 0.0, unit: float = 1.0) -> str | None:
+def l2_reason(sums: L2Sums, *, rtol: float, l2_factor: float, inherited: float = 0.0) -> str | None:
     """The relative L2 check on a whole output's :class:`L2Sums`: ``strict_small_l2`` or ``None``.
 
     A reference with no finite magnitude passes (the L2 error would be 0/0; the atol band is the contract). The
     denominator falls back to the inf-norm when the sum of squares underflows the scale away (an array of ~1e-200
     elements), so the ratio is a real number (inf on an overflowed error). An output computed from much larger
     quantities inherits their rounding (channel_flow's v, 1e-7 of the u that drives it): ``inherited`` adds that
-    eps-sized term, 0.0 leaves the bound at ``l2_factor * rtol``. ``unit`` is the one :func:`l2_sums` summed in."""
+    eps-sized term, 0.0 leaves the bound at ``l2_factor * rtol``."""
     if sums.scale == 0.0:
         return None
-    norm = max(math.sqrt(sums.ref_sq) * unit, sums.scale)
-    error = math.sqrt(sums.err_sq) * unit
+    norm = max(math.sqrt(sums.ref_sq), sums.scale)
+    error = math.sqrt(sums.err_sq)
     ratio = error / norm
     if ratio <= l2_factor * (rtol + inherited / norm):
         return None
@@ -233,7 +196,6 @@ def strict_small_reason(
     inherited: float = 0.0,
     xp: types.ModuleType = np,
     chunk: int = STRICT_CHUNK,
-    over: SpanMap = serial_spans,
 ) -> str | None:
     """Why ``val`` fails the strict small-element gate against ``ref``, or ``None``.
 
@@ -255,8 +217,7 @@ def strict_small_reason(
     ``rounding_scale``): ``growth * ||sources||_2``, the comparator's floor formula with the sources' norm for the
     output's own peak. The L2 error must hold within ``l2_factor * (rtol * ||ref||_2 + inherited)``; ``0.0`` (an
     output with no declared sources) is the plain relative bound.
-    ``xp`` is the operands' array module (numpy, or cupy on a device grade). ``over`` runs each chunked pass over
-    its slices, in order (the comparator's threaded ``over_spans``); the sums fold in slice order whatever it is.
+    ``xp`` is the operands' array module (numpy, or cupy on a device grade).
 
     Complex elements are checked componentwise: the real and imaginary parts each meet the sign floor
     and agree in sign on their own (the comparator's +-Inf sign check convention), so a rounding-sized
@@ -277,33 +238,27 @@ def strict_small_reason(
     if not ((sign_margin is None or sign_margin > 0) and l2_factor > 0):
         raise ValueError(f"sign_margin (None or > 0) and l2_factor (> 0), got {sign_margin!r}, {l2_factor!r}")
     step = max(int(chunk), 1)
-    spans = [slice(start, start + step) for start in range(0, int(rf.size), step)]
-    # The squares in units of the whole output's finite inf-norm: a first pass, then the sums.
-    unit = max(over(spans, lambda span: finite_peak(rf[span], vf[span], xp)), default=0.0)
-    unit = unit if unit > 0.0 else 1.0
+    starts = range(0, int(rf.size), step)
     sums = L2Sums(0.0, 0.0, 0.0)
-    for part_sums in over(
-        spans, lambda span: l2_sums(rf[span], vf[span], rtol=rtol, band_atol=band_atol, xp=xp, unit=unit)
-    ):
-        sums = sums.plus(part_sums)
-    reason = l2_reason(sums, rtol=rtol, l2_factor=l2_factor, inherited=inherited, unit=unit)
+    for start in starts:
+        sums = sums.plus(
+            l2_sums(rf[start : start + step], vf[start : start + step], rtol=rtol, band_atol=band_atol, xp=xp)
+        )
+    reason = l2_reason(sums, rtol=rtol, l2_factor=l2_factor, inherited=inherited)
     if reason is not None or sign_margin is None or sums.scale == 0.0:
         return reason
-    threshold = sign_margin * (float(growth) if growth is not None else dtype_eps(r.dtype)) * sums.scale
+    threshold = sign_margin * (float(growth) if growth is not None else _dtype_eps(r.dtype)) * sums.scale
     signs = SignMismatches(0, -1)
     complex_inputs = bool(np.iscomplexobj(rf))
-    parts = over(
-        spans,
-        lambda span: sign_mismatches(
-            rf[span],
-            vf[span],
+    for start in starts:
+        part = sign_mismatches(
+            rf[start : start + step],
+            vf[start : start + step],
             threshold=threshold,
             rtol=rtol,
             band_atol=band_atol,
             complex_inputs=complex_inputs,
             xp=xp,
-        ),
-    )
-    for span, part in zip(spans, parts, strict=True):
-        signs = signs.plus(part, span.start)
+        )
+        signs = signs.plus(part, start)
     return sign_reason(signs, total=int(rf.size), threshold=threshold, allowed=allowed_sign_mismatches)
