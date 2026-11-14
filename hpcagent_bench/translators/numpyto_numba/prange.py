@@ -6,7 +6,7 @@ nothing, that hands no array to a helper writing it, and that runs inside no oth
 import ast
 import copy
 
-from hpcagent_bench.translators.numpyto_common.ast_build import ALL_BLOCK_FIELDS, walk_nodes
+from hpcagent_bench.translators.numpyto_common.ast_build import walk_nodes
 from hpcagent_bench.translators.numpyto_common.parallelism import (
     bare_store_names,
     index_exprs,
@@ -46,7 +46,6 @@ __all__ = [
     "private_scalars",
     "range_loop",
     "scalar_literal",
-    "statement_blocks",
     "unaliased",
     "unit_step",
     "without_updates",
@@ -187,17 +186,6 @@ def range_loop(node: ast.AST) -> bool:
     )
 
 
-def statement_blocks(stmt: ast.stmt) -> list[list[ast.stmt]]:
-    """The statement lists ``stmt`` holds: its bodies, branches and ``finally`` (:data:`ALL_BLOCK_FIELDS`), each
-    ``except`` handler's body and each ``match`` case's."""
-    blocks = [value for field, value in ast.iter_fields(stmt) if field in ALL_BLOCK_FIELDS and isinstance(value, list)]
-    if isinstance(stmt, (ast.Try, ast.TryStar)):
-        blocks += [handler.body for handler in stmt.handlers]
-    if isinstance(stmt, ast.Match):
-        blocks += [case.body for case in stmt.cases]
-    return blocks
-
-
 def leaves_the_loop(loop: ast.For) -> bool:
     """A ``break`` / ``continue`` of ``loop`` itself or a ``return`` anywhere in its body: a prange body is one
     iteration with no way out."""
@@ -207,8 +195,12 @@ def leaves_the_loop(loop: ast.For) -> bool:
             if isinstance(stmt, ast.Return) or (own and isinstance(stmt, (ast.Break, ast.Continue))):
                 return True
             inner = own and not isinstance(stmt, (ast.For, ast.While))
-            if any(walk(block, inner) for block in statement_blocks(stmt)):
-                return True
+            for block in (getattr(stmt, "body", None), getattr(stmt, "orelse", None), getattr(stmt, "finalbody", None)):
+                if isinstance(block, list) and walk(block, inner):
+                    return True
+            for handler in getattr(stmt, "handlers", []):
+                if walk(handler.body, inner):
+                    return True
         return False
 
     return walk(loop.body, True) or walk(loop.orelse, False)
@@ -282,9 +274,7 @@ def written_in_body(loop: ast.For, mutates: dict[str, frozenset[str]], params: d
     handed (a writing helper, ``out=``, a mutating method)."""
     body = ast.Module(body=list(loop.body), type_ignores=[])
     written = written_arrays(body)
-    written |= {
-        n.target.id for n in walk_nodes(body) if isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name)
-    }
+    written |= {n.target.id for n in walk_nodes(body) if isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name)}
     for n in walk_nodes(body):
         if isinstance(n, ast.Call):
             written |= names_written_by_call(n, mutates, params)
@@ -294,8 +284,7 @@ def written_in_body(loop: ast.For, mutates: dict[str, frozenset[str]], params: d
 def numba_reduction(loop: ast.For, fn: ast.FunctionDef) -> str | None:
     """The accumulator of a reduction numba's prange carries (:data:`PRANGE_REDUCTION_OPS`), proven by
     :func:`loop_reduction`, or ``None``. The accumulator must be a scalar: every binding of it outside the loop
-    is a numeric literal (``s = 0.0``, ``m = -np.inf``), and it is not a parameter. The body updates it once:
-    numba refuses a second update (tsvc_2_s319's two ``sum_val = sum_val + ...``)."""
+    is a numeric literal (``s = 0.0``, ``m = -np.inf``), and it is not a parameter."""
     found = loop_reduction(loop)
     if found is None or found[0] not in PRANGE_REDUCTION_OPS:
         return None
@@ -303,8 +292,6 @@ def numba_reduction(loop: ast.For, fn: ast.FunctionDef) -> str | None:
     if acc in {a.arg for a in fn.args.args}:
         return None
     combines = [n for n in walk_nodes(ast.Module(body=list(loop.body), type_ignores=[])) if binds_name(n, acc)]
-    if len(combines) != 1:
-        return None  # numba's parfor reduction takes ONE update of the accumulator per iteration.
     if op in ("max", "min") and not all(
         isinstance(n, ast.Assign)
         and isinstance(n.value, ast.Call)
@@ -404,18 +391,15 @@ def prange_safe(
         return False
     private = private_scalars(loop)
     live = scalars_live_after(fn, loop)
-    probe = without_updates(loop, private)
-    if live or not loop_is_parallel_safe(probe):
+    if live or not loop_is_parallel_safe(without_updates(loop, private)):
         acc = numba_reduction(loop, fn)
         if acc is None or acc in private or live - {acc}:
             return False
-        probe = without_updates(loop, private | {acc})
-        if not loop_is_parallel_safe(probe):
+        if not loop_is_parallel_safe(without_updates(loop, private | {acc})):
             return False
     if index_live_after(fn, loop):
         return False
-    # The probe's writes: a private scalar's or the accumulator's update is not an array store.
-    return all(unaliased(fn, name, ranks) for name in written_in_body(probe, mutates, params))
+    return all(unaliased(fn, name, ranks) for name in written_in_body(loop, mutates, params))
 
 
 def outermost_safe_loops(
@@ -432,17 +416,19 @@ def outermost_safe_loops(
         if isinstance(stmt, ast.For) and prange_safe(stmt, fn, ranks, mutates, params):
             found.append(stmt)
             continue
-        for block in statement_blocks(stmt):
-            found += outermost_safe_loops(block, fn, ranks, mutates, params)
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(stmt, field, None)
+            if isinstance(block, list):
+                found += outermost_safe_loops(block, fn, ranks, mutates, params)
+        for handler in getattr(stmt, "handlers", []):
+            found += outermost_safe_loops(handler.body, fn, ranks, mutates, params)
     return found
 
 
 def module_calls(node: ast.AST, functions: set[str]) -> set[str]:
     """The module functions called anywhere under ``node``."""
     return {
-        n.func.id
-        for n in walk_nodes(node)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in functions
+        n.func.id for n in walk_nodes(node) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in functions
     }
 
 
@@ -493,11 +479,7 @@ def parallelize_range_loops(
     tree = ast.parse(src)
     fns = {fn.name: fn for fn in tree.body if isinstance(fn, ast.FunctionDef)}
     mutates, params = written_parameters(tree)
-    aliased = {
-        n.func.id
-        for n in walk_nodes(tree)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and hands_a_written_array_twice(n, mutates, params)
-    }
+    aliased = {n.func.id for n in walk_nodes(tree) if isinstance(n, ast.Call) and hands_a_written_array_twice(n, mutates, params)}
     chosen = {
         name: outermost_safe_loops(fn.body, fn, (ranks or {}).get(name, {}), mutates, params)
         for name, fn in fns.items()
@@ -518,14 +500,9 @@ def parallelize_range_loops(
                 frontier += calls[callee]
     ordered = set(callers_first(calls))
     chosen = {name: found for name, found in chosen.items() if name in ordered}
-    heads = [
-        loop.iter.func
-        for name, found in chosen.items()
-        if name not in nested
-        for loop in found
-        if isinstance(loop.iter, ast.Call)
-    ]
-    for func in sorted(heads, key=lambda f: (f.lineno, f.col_offset), reverse=True):
+    loops = [loop for name, found in chosen.items() if name not in nested for loop in found]
+    for loop in sorted(loops, key=lambda n: (n.iter.func.lineno, n.iter.func.col_offset), reverse=True):
+        func = loop.iter.func
         off = abs_offset(src, func.lineno, func.col_offset)
         if src[off : off + 5] == "range":
             src = src[:off] + "nb.prange" + src[off + 5 :]
