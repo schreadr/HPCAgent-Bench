@@ -15,8 +15,6 @@ action (:func:`split_shard`). The actions:
 * ``baselines``: only the reference grades of ``prepare``: every kernel's baselines and goldens for /score and
   /submit, timed once and reused until its kernel, init or seed changes (a judge also fills what is missing);
 * ``baseline``: the deterministic compiler columns over a tag (:mod:`hpcagent_bench.cluster.baseline`);
-* ``retune`` (not an action: it runs on the login node) edits a pending job's env with a backup and a ledger entry
-  (:mod:`hpcagent_bench.cluster.retune`);
 * ``submit`` (not an action: it runs on the login node) starts any job script with the node shape of the system it
   runs on around what its ``#SBATCH`` header pins, from flags, the environment or ``systems.yaml``
   (:mod:`hpcagent_bench.cluster.systems`).
@@ -35,11 +33,11 @@ from hpcagent_bench import osinfo, paths
 
 __all__ = [
     "ACTIONS",
-    "FORWARDING",
     "KFD_NODES_DIR",
     "NVIDIA_GPUS_DIR",
-    "SHARD_OPTIONS",
+    "FORWARDING",
     "Action",
+    "SHARD_OPTIONS",
     "Rank",
     "add_repo",
     "adopt_shard",
@@ -51,16 +49,14 @@ __all__ = [
     "export_slots",
     "launch_problems",
     "main",
-    "narrow_devices",
     "node_has_gpus",
-    "node_is_nvidia",
     "rank_from_environ",
     "relaunch_under_openmp_env",
     "run_baseline",
     "run_grade_under",
     "run_prepare",
-    "run_slots",
     "share",
+    "run_slots",
     "slot_width",
     "split_shard",
     "task_slots",
@@ -113,17 +109,7 @@ def split_shard(words: Sequence[str]) -> tuple[dict[str, str], list[str]]:
 def adopt_shard(environ: MutableMapping[str, str], shard: Mapping[str, str]) -> None:
     """Make this task read as the shard :func:`split_shard` named: every reader of its rank (:func:`rank_from_environ`,
     the results-DB shard, DaCe's per-rank build folder, :func:`bind_task`'s GPU) then sees what a task of one N-task
-    step would. A no-op without shard options.
-
-    The one-task step's launcher also names its rank (``PMI_RANK=0`` under Cray's ``cray_shasta`` plugin), and DaCe
-    and :func:`~hpcagent_bench.frameworks.dace_framework.mpi_rank` read that before ``SLURM_PROCID``: it goes, or
-    every shard would share rank 0's build folder and load a library another shard is still writing."""
-    if not shard:
-        return
-    from hpcagent_bench.frameworks.utilities import MPI_LAUNCHER_VARS  # deferred: it imports NumPy
-
-    for name in MPI_LAUNCHER_VARS:
-        environ.pop(name, None)
+    step would. A no-op without shard options."""
     environ.update(shard)
 
 
@@ -175,19 +161,6 @@ def node_has_gpus() -> bool:
     return False
 
 
-def node_is_nvidia() -> bool:
-    """Whether the NVIDIA driver lists a GPU on this node (procfs, no runtime loaded)."""
-    return NVIDIA_GPUS_DIR.is_dir() and any(NVIDIA_GPUS_DIR.iterdir())
-
-
-def narrow_devices(environ: MutableMapping[str, str], devices: str) -> None:
-    """Give the task ``devices``: ROCR_VISIBLE_DEVICES, and on an NVIDIA node CUDA_VISIBLE_DEVICES, which the CUDA
-    runtime reads instead (``run_cluster.sh`` narrow_judge_devices)."""
-    environ["ROCR_VISIBLE_DEVICES"] = devices
-    if node_is_nvidia():
-        environ["CUDA_VISIBLE_DEVICES"] = devices
-
-
 def export_slots(environ: MutableMapping[str, str], slots: int) -> None:
     """Give the judge config ``slots`` grading slots: GPU slots on a node with GPUs, CPU slots on one without (0
     leaves the CPU slot count to the config's one-per-NUMA-domain default)."""
@@ -212,9 +185,9 @@ def bind_task(environ: MutableMapping[str, str], repo: pathlib.Path) -> None:
         own = range(int(local) * slots, (int(local) + 1) * slots)
         inherited = [device.strip() for device in osinfo.inherited_visible(environ).split(",") if device.strip()]
         if len(inherited) >= own.stop:
-            narrow_devices(environ, ",".join(inherited[index] for index in own))
+            environ["ROCR_VISIBLE_DEVICES"] = ",".join(inherited[index] for index in own)
         elif not inherited:
-            narrow_devices(environ, ",".join(str(index) for index in own))
+            environ["ROCR_VISIBLE_DEVICES"] = ",".join(str(index) for index in own)
     export_slots(environ, slots if slots > 1 else 0)
     # job_step.sh names the width before the interpreter loads a runtime; a launch that did not has them loaded at
     # their default (every logical CPU), which the graded child narrows, and its own children read this.
@@ -412,10 +385,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         from hpcagent_bench.cluster import systems
 
         return systems.main(words[1:])
-    if words[:1] == ["retune"]:
-        from hpcagent_bench.cluster import retune
-
-        return retune.main(words[1:])
     if words[:1] == ["options"]:
         from hpcagent_bench.cluster import systems
 
@@ -456,12 +425,8 @@ def run_slots(action: Action, args: argparse.Namespace, rank: Rank, slots: int) 
 
 
 def run_slot(action: Action, args: argparse.Namespace, rank: Rank, slot: int) -> None:
-    """Worker ``slot`` of :func:`run_slots`: ``action`` as ``rank`` on the slot's cores and device. The worker's
-    environment names its own rank, as a shard's does (:func:`adopt_shard`): the forked workers inherit the task's
-    launcher rank (``PMI_RANK=0`` under ``cray_shasta``), which DaCe reads first for its per-rank build folder, so
-    without it every worker would build into rank 0's folder and load a library a sibling is still writing."""
+    """Worker ``slot`` of :func:`run_slots`: ``action`` as ``rank`` on the slot's cores and device."""
     from hpcagent_bench.harness import native_call  # deferred: the grading stack is heavy for the other actions
 
-    adopt_shard(os.environ, {"SLURM_PROCID": str(rank.index), "SLURM_NTASKS": str(rank.size)})
     native_call.set_assigned_device(slot)
     raise SystemExit(action.run(args, rank))
