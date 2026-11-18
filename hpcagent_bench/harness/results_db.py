@@ -184,10 +184,10 @@ ADDED: dict[int, tuple[str, ...]] = {
     32: ("ALTER TABLE grades ADD COLUMN fuzz_shapes INTEGER",),
     33: ("ALTER TABLE episodes ADD COLUMN launch_mode TEXT NOT NULL DEFAULT ''",),
     34: (
-        "ALTER TABLE grades ADD COLUMN commit_dirty INTEGER CHECK (commit_dirty IN (0, 1))",
+        "ALTER TABLE grades ADD COLUMN timing_protocol TEXT NOT NULL DEFAULT ''",
         *(
-            f"ALTER TABLE grades ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
-            for column in ("image_digest", "gpu", "dace_commit", "compilers")
+            f"ALTER TABLE grades ADD COLUMN {reading} INTEGER"
+            for reading in ("timing_parent_ns", "timing_handshake_ns", "timing_spread_ns", "timing_short")
         ),
     ),
 }
