@@ -27,12 +27,12 @@ from hpcagent_bench.categories import Language, Residency, SourceMode
 from hpcagent_bench.harness.envelope import Submission
 from hpcagent_bench.harness.task import Task
 from hpcagent_bench.harness.usage import TokenUsage
-from hpcagent_bench.ir_reference import lowered_reference
 from hpcagent_bench.kernel_key import kernel_stem
-from hpcagent_bench.languages import GPU_HOST_LANG, IR_SOURCE_LANG, LANG_TARGET
+from hpcagent_bench.languages import GPU_HOST_LANG, LANG_EXT, LANG_TARGET
 from hpcagent_bench.spec import BenchSpec, register_manifest_cache
 from hpcagent_bench.support.bindings import binding_from_spec, gen_call_stub
 from hpcagent_bench.support.bindings.contract import WORKSPACE_NAME, WORKSPACE_SIZE_NAME
+from hpcagent_bench.translators.numpyto_c.style import restyle
 
 if TYPE_CHECKING:
     from anthropic.types import MessageParam
@@ -85,6 +85,7 @@ __all__ = [
     "reference_abi_dtype",
     "reference_mpi_source",
     "reference_source",
+    "starting_source",
     "with_workspace_parameters",
 ]
 
@@ -257,11 +258,6 @@ def _reference_source(kernel: str, language: Language, prefer_committed: bool, a
     source for both."""
     from hpcagent_bench.emit_bridge import emit_kernel
 
-    source_language = IR_SOURCE_LANG.get(language)
-    if source_language is not None:
-        # An IR language starts from its source language's reference, lowered (the entry keeps the C ABI).
-        source = _reference_source(kernel, source_language, prefer_committed, abi_dtype)
-        return lowered_reference(source, language, kernel_stem(kernel))
     if prefer_committed:
         override = committed_reference_override(kernel, language)
         if override is not None:
@@ -307,6 +303,11 @@ def emit_reference_source(kernel: str, language: Language) -> str:
 def generated_reference_source(kernel: str, language: Language) -> str:
     """The NumpyToX emit of ``kernel`` in ``language``, never a committed override: what an agent starts from."""
     return _reference_source(kernel, language, False, reference_abi_dtype(kernel))
+
+
+def starting_source(kernel: str, language: Language) -> str:
+    """The reference an agent starts from: :func:`generated_reference_source` spelled in ``references.style``."""
+    return restyle(generated_reference_source(kernel, language), config.current().references.style, LANG_EXT[language])
 
 
 def reference_abi_dtype(kernel: str) -> str:
