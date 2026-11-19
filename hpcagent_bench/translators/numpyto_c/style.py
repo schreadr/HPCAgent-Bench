@@ -31,6 +31,8 @@ from collections.abc import Iterator
 
 from hpcagent_agent.coded import Coded
 
+from hpcagent_bench.categories import Language
+
 __all__ = ["CodeStyle", "header_names", "llm_friendly", "main", "restyle"]
 
 
@@ -56,10 +58,56 @@ TOKEN = re.compile(
 )
 #: C keywords and the type names the emit casts to; never a rename target and never unparenthesized.
 C_WORDS = frozenset(
-    "auto break case char const continue default do double else enum extern float for goto if inline int long "
-    "register restrict return short signed sizeof static struct switch typedef union unsigned void volatile while "
-    "bool true false _Bool _Complex _Imaginary _Alignas _Alignof _Atomic _Generic _Noreturn _Static_assert "
-    "_Thread_local NULL".split()
+    [
+        "auto",
+        "break",
+        "case",
+        "char",
+        "const",
+        "continue",
+        "default",
+        "do",
+        "double",
+        "else",
+        "enum",
+        "extern",
+        "float",
+        "for",
+        "goto",
+        "if",
+        "inline",
+        "int",
+        "long",
+        "register",
+        "restrict",
+        "return",
+        "short",
+        "signed",
+        "sizeof",
+        "static",
+        "struct",
+        "switch",
+        "typedef",
+        "union",
+        "unsigned",
+        "void",
+        "volatile",
+        "while",
+        "bool",
+        "true",
+        "false",
+        "_Bool",
+        "_Complex",
+        "_Imaginary",
+        "_Alignas",
+        "_Alignof",
+        "_Atomic",
+        "_Generic",
+        "_Noreturn",
+        "_Static_assert",
+        "_Thread_local",
+        "NULL",
+    ]
 )
 #: Characters after which ``(name)`` is an operand, never a call, a cast or a ``sizeof`` argument.
 OPERAND_BEFORE = frozenset("*+-/%<>=&|^!~?:,([")
