@@ -16,7 +16,7 @@ KERNELS=(
     cloudsc_lu_solver mixed_precision_ir qe_newdxx_g portfolio_optimization
 )
 DTYPE=float32          # a kernel whose manifest lists only fp64 needs float64
-declare -A DTYPE_FOR= (
+declare -A DTYPE_FOR=(
     mixed_precision_ir=float64
 )
 REPS=3                 # repetitions for the preset M run
