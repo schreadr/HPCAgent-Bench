@@ -2,7 +2,7 @@
 #SBATCH --job-name=bench_sweep
 #SBATCH -A dphpc
 #SBATCH --gpus=5060ti:1          # or gb10:1 on GB10
-#SBATCH --time=02:00:00          # billed for the WHOLE allocation, so size it to the sweep
+#SBATCH --time=03:00:00          # billed for the WHOLE allocation, so size it to the sweep
 #SBATCH --output=sweep_%j.out
 #SBATCH --error=sweep_%j.err
 
@@ -12,16 +12,18 @@ cd "$SLURM_SUBMIT_DIR" || exit 1
 # ---- edit these -------------------------------------------------------------------------------
 KERNELS=(
     subset_sum nqueens qe_addusxx_g comet_int4_gemm
-    distribution_search eigh_generalized householder_qr largest_eigenval
+    distribution_search eigh_generalized householder_qr
     cloudsc_lu_solver mixed_precision_ir qe_newdxx_g portfolio_optimization
 )
 DTYPE=float32          # a kernel whose manifest lists only fp64 needs float64
 declare -A DTYPE_FOR=(
-    mixed_precision_ir=float64
+    [mixed_precision_ir]=float64
+    [eigh_generalized]=float64
 )
 REPS=3                 # repetitions for the preset M run
-PER_RUN_LIMIT=20m      # a hung kernel must not burn the whole allocation
+PER_RUN_LIMIT=30m      # a hung kernel must not burn the whole allocation
 RUN="uv run hpcagent-bench"
+FRAMEWORKS=(triton numpy)
 # Container variant for final numbers (swap the line above):
 # RUN="apptainer exec --nv $HOME/judge-nvidia-x86_64.sif hpcagent-bench"
 # If you use the separate x86 environment from the how-to, export it before sbatch or here:
@@ -39,6 +41,14 @@ LOGDIR="logs/sweep_${SLURM_JOB_ID}"
 mkdir -p "$LOGDIR"
 FAILED=()
 
+# Start from a fresh results database so the median table holds only this sweep's rows.
+# The old file is kept as a timestamped backup, nothing is deleted.
+DB=results/hpcagent_bench0.db
+if [ -f "$DB" ]; then
+    mv "$DB" "$DB.bak_$(date +%Y%m%d_%H%M%S)"
+    echo "Moved old results database to $DB.bak_*"
+fi
+
 run() {  # run <label> <log name> <command...>
     local label="$1" log="$LOGDIR/$2.log"
     shift 2
@@ -51,11 +61,14 @@ run() {  # run <label> <log name> <command...>
 
 for k in "${KERNELS[@]}"; do
     # preset M
-    run "$k  M" "${k}_M" \
-        $RUN run-framework -f triton -b "$k" -p M -d "$DTYPE" -r "$REPS"
-    # default fuzzed preset (official evaluation; no -p)
-    run "$k  fuzzed" "${k}_fuzzed" \
-        $RUN run-framework -f triton -b "$k" -d "$DTYPE"
+    dt="${DTYPE_FOR[$l]:-$DTYPE}"
+    for fw in "${FRAMEWORKS[@]}"; do
+        run "$k  M $fw ($dt)" "${k}_M_${fw}" \
+            $RUN run-framework -f "$fw" -b "$k" -p M -d "$dt" -r "$REPS"
+        # default fuzzed preset (official evaluation; no -p)
+        run "$k  fuzzed $fw ($dt)" "${k}_fuzzed_${fw}" \
+            $RUN run-framework -f "$fw" -b "$k" -d "$dt"
+    done
 done
 
 # Median runtimes for this sweep's kernels, from the results database (also saved as CSV).
